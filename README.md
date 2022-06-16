@@ -5,7 +5,7 @@ Do your training. We will take care of the statistics.
 ## Installation
 
 ```
-pip install git+https://github.com/justanhduc/neural-monitor
+pip install git+https://github.com/Raoshijin/neural_monitor
 ```
 
 ## Usages
