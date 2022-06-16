@@ -9,13 +9,13 @@ def setup_package():
         long_description = f.read()
 
     setup(
-        name='neural-monitor',
+        name='neural_monitor',
         version=versioneer.get_version(),
         cmdclass=versioneer.get_cmdclass(),
         description='Let me take care of your experiments statistics.',
         long_description=long_description,
         long_description_content_type='text/markdown',
-        url='https://github.com/justanhduc/neural-monitor',
+        url='https://github.com/Raoshijin/neural_monitor',
         author='Duc Nguyen',
         author_email='adnguyen@yonsei.ac.kr',
         classifiers=[
