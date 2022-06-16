@@ -502,6 +502,12 @@ class Monitor:
         self.hist_folder = os.path.join(self.current_folder, 'histograms')
         os.makedirs(self.hist_folder, exist_ok=True)
 
+        self.seg_folder = os.path.join(self.current_folder, 'segmentation')
+        os.makedirs(self.seg_folder, exist_ok=True)
+
+        self.seg_folder = os.path.join(self.current_folder, 'loss_value')
+        os.makedirs(self.seg_folder, exist_ok=True)
+
         file_handler = logging.FileHandler(f'{self.file_folder}/history.log')
         file_handler.setFormatter(log_formatter)
         root_logger.addHandler(file_handler)
@@ -626,6 +632,12 @@ class Monitor:
         root_logger.info('Latest commit id: {}'.format(self.git.commit_id))
         root_logger.info('Latest commit message: {}'.format(self.git.commit_message))
         root_logger.info('Latest commit date: {}'.format(datetime.datetime.fromtimestamp(self.git.commit_datetime)))
+
+    def save_image(self, name, image):
+        imageio.imwrite(os.path.join(self.seg_folder, ('segmentation_{name}.jpg').format(name=name)), image)
+
+    def getpath(self):
+        return self.seg_folder
 
     def iter_epoch(self, iterator: Iterable) -> Any:
         """
