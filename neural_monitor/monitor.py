@@ -29,6 +29,7 @@ from typing import (
 )
 import pandas as pd
 from easydict import EasyDict
+import imageio
 
 try:
     import visdom
@@ -244,22 +245,6 @@ def standardize_image(img):
     return img
 
 
-def _convert_time_human_readable(t):
-    if t < 60:
-        time_unit = 's'
-    elif 60 <= t < 3600:
-        time_unit = 'mins'
-        t /= 60.
-    elif 86400 > t >= 3600:
-        time_unit = 'hrs'
-        t /= 3600.
-    else:
-        time_unit = 'days'
-        t /= 86400
-
-    return t, time_unit
-
-
 class Monitor:
     """
     Collects statistics and displays the results using various backends.
@@ -332,10 +317,9 @@ class Monitor:
         self.model_name = None
         self.root = None
         self.prefix = None
-        self._num_iters_per_epoch = None
+        self._num_iters = None
         self.print_freq = 1
-        self.num_iters_per_epoch = None
-        self.num_epochs = None
+        self.num_iters = None
         self.use_tensorboard = None
         self.current_folder = None
         self.plot_folder = None
@@ -364,8 +348,7 @@ class Monitor:
             self._begin_iter_: collections.defaultdict(_spawn_defaultdict_ordereddict),
             self._end_iter_: collections.defaultdict(_spawn_defaultdict_ordereddict)
         }
-        self._init_time = None
-        self._start_epoch = None
+        self._timer = time.time()
         self._io_method = {'pickle_save': self._save_pickle, 'txt_save': self._save_txt,
                            'torch_save': self._save_torch, 'pickle_load': self._load_pickle,
                            'txt_load': self._load_txt, 'torch_load': self._load_torch}
@@ -387,21 +370,13 @@ class Monitor:
 
         super().__setattr__(attr, val)
 
-    def initialize(
-            self,
-            model_name: Optional[str] = None,
-            root: Optional[str] = None,
-            current_folder: Optional[str] = None,
-            print_freq: Optional[int] = 1,
-            num_iters_per_epoch: Optional[int] = None,
-            num_epochs: Optional[int] = None,
-            prefix: Optional[str] = None,
-            use_tensorboard: Optional[bool] = True,
-            with_git: Optional[bool] = False,
-            not_found_warn: bool = True
-    ) -> None:
+    def initialize(self, model_name: Optional[str] = None, root: Optional[str] = None,
+                   current_folder: Optional[str] = None, print_freq: Optional[int] = 1,
+                   num_iters: Optional[int] = None, prefix: Optional[str] = None,
+                   use_tensorboard: Optional[bool] = True, with_git: Optional[bool] = False,
+                   not_found_warn: bool = True) -> None:
         """
-        initializes the working directory for logging.
+        Initializes the working directory for logging.
         If the training is distributed, this initialization should be called
         after the distributed mode has been initialized.
 
@@ -420,13 +395,9 @@ class Monitor:
         :param print_freq:
             frequency of stdout.
             Default: 1.
-        :param num_iters_per_epoch:
+        :param num_iters:
             number of iterations per epoch.
             If not provided, it will be calculated after one epoch.
-            Default: ``None``.
-        :param num_epochs:
-            total number of epochs.
-            If provided, ETA will be shown.
             Default: ``None``.
         :param prefix:
             a common prefix that is shared between folder names of different runs.
@@ -451,10 +422,9 @@ class Monitor:
         self.model_name = 'my-model' if model_name is None else model_name
         self.root = root
         self.prefix = prefix
-        self._num_iters_per_epoch = num_iters_per_epoch
+        self._num_iters = num_iters
         self.print_freq = print_freq
-        self.num_iters_per_epoch = num_iters_per_epoch
-        self.num_epochs = num_epochs
+        self.num_iters = num_iters
         self.use_tensorboard = use_tensorboard
         self.current_folder = os.path.abspath(current_folder) if current_folder is not None else None
         self.with_git = with_git
@@ -496,9 +466,6 @@ class Monitor:
         self.image_folder = os.path.join(self.current_folder, 'images')
         os.makedirs(self.image_folder, exist_ok=True)
 
-        self.mesh_folder = os.path.join(self.current_folder, 'meshes')
-        os.makedirs(self.mesh_folder, exist_ok=True)
-
         self.hist_folder = os.path.join(self.current_folder, 'histograms')
         os.makedirs(self.hist_folder, exist_ok=True)
 
@@ -514,8 +481,6 @@ class Monitor:
 
         root_logger.info(f'Result folder: {self.current_folder}')
         self._initialized = True
-        self._init_time = time.time()
-        self._start_epoch = self.epoch
 
         if self.use_tensorboard:
             self.init_tensorboard()
@@ -526,7 +491,7 @@ class Monitor:
         state_dict = {
             'iter': self.iter,
             'epoch': self.epoch,
-            'num_iters': self.num_iters_per_epoch,
+            'num_iters': self.num_iters,
             'num': self._num_since_beginning.copy(),
             'hist': self._hist_since_beginning.copy(),
             'options': self._options.copy()
@@ -546,9 +511,9 @@ class Monitor:
             if not_found_warn:
                 root_logger.warning('No record found for `hist`', exc_info=True)
 
-        if self.num_iters_per_epoch is None:
+        if self.num_iters is None:
             try:
-                self.num_iters_per_epoch = state_dict['num_iters']
+                self.num_iters = state_dict['num_iters']
             except KeyError:
                 if not_found_warn:
                     root_logger.warning('No record found for `num_iters`', exc_info=True)
@@ -562,8 +527,8 @@ class Monitor:
         try:
             self.epoch = state_dict['epoch']
         except KeyError:
-            if self.num_iters_per_epoch:
-                self.epoch = self.iter // self.num_iters_per_epoch
+            if self.num_iters:
+                self.epoch = self.iter // self.num_iters
             else:
                 if not_found_warn:
                     root_logger.warning('No record found for `epoch`', exc_info=True)
@@ -635,7 +600,7 @@ class Monitor:
 
     def save_image(self, name, image):
         imageio.imwrite(os.path.join(self.seg_folder, ('segmentation_{name}.jpg').format(name=name)), image)
-
+    
     def getpath(self):
         return self.seg_folder
 
@@ -652,7 +617,7 @@ class Monitor:
         Examples
         --------
 
-        >>> from neural_monitor import monitor as mon
+        >>> from neuralnet_pytorch import monitor as mon
         >>> mon.print_freq = 1000
         >>> num_epochs = 10
         >>> for epoch in mon.iter_epoch(range(mon.epoch, num_epochs))
@@ -660,15 +625,15 @@ class Monitor:
 
         See Also
         --------
-        iter_batch
+        :meth:`~iter_batch`
         """
 
-        if self.num_iters_per_epoch:
-            self.iter = self.epoch * self.num_iters_per_epoch
+        if self.num_iters:
+            self.iter = self.epoch * self.num_iters
 
         for item in iterator:
-            if self.epoch > 0 and self.num_iters_per_epoch is None:
-                self.num_iters_per_epoch = self.iter // self.epoch
+            if self.epoch > 0 and self.num_iters is None:
+                self.num_iters = self.iter // self.epoch
 
             yield item
             self.epoch += 1
@@ -686,7 +651,7 @@ class Monitor:
         Examples
         --------
 
-        >>> from neural_monitor import monitor as mon
+        >>> from neuralnet_pytorch import monitor as mon
         >>> mon.print_freq = 1000
         >>> data_loader = ...
         >>> num_epochs = 10
@@ -696,7 +661,7 @@ class Monitor:
 
         See Also
         --------
-        iter_epoch
+        :meth:`~iter_epoch`
         """
 
         for item in iterator:
@@ -712,8 +677,8 @@ class Monitor:
             if self.iter % self.print_freq == 0:
                 self.flush()
         self.iter += 1
-        if self.num_iters_per_epoch:
-            self.epoch = self.iter // self.num_iters_per_epoch
+        if self.num_iters:
+            self.epoch = self.iter // self.num_iters
 
     @property
     def prefix(self) -> str:
@@ -818,8 +783,8 @@ class Monitor:
 
         assert epoch >= 0, 'Epoch must be non-negative'
         self._last_epoch = int(epoch)
-        if self.num_iters_per_epoch:
-            self.iter = self.epoch * self.num_iters_per_epoch
+        if self.num_iters:
+            self.iter = self.epoch * self.num_iters
 
     @property
     def num_stats(self):
@@ -1252,48 +1217,6 @@ class Monitor:
             prefix = kwargs.pop('prefix', 'hist/')
             self.writer.add_histogram(prefix + name.replace(' ', '-'), value, global_step=self.iter, **kwargs)
 
-    def save_meshes(self, name, meshes=None, verts=None, faces=None, verts_uvs=None, faces_uvs=None, texture_map=None):
-        try:
-            from pytorch3d import io
-            from pytorch3d.structures import Meshes
-            from pytorch3d.renderer import TexturesUV
-        except ModuleNotFoundError:
-            logger.info('Pytorch3D must be installed to use this function.')
-            return
-
-        if meshes is not None:
-            assert isinstance(meshes, Meshes)
-            assert verts is None and faces is None and verts_uvs is None and faces_uvs is None, \
-                '`meshes` and other arguments are mutually exclusive'
-
-        if meshes is None:
-            if isinstance(verts, T.Tensor):
-                if len(verts.shape) == len(faces.shape) == 2:
-                    filename = os.path.join(self.mesh_folder, f'{name}.obj')
-                    io.save_obj(filename, verts, faces, verts_uvs=verts_uvs, faces_uvs=faces_uvs, texture_map=texture_map)
-                    return
-
-            assert len(verts) == len(faces)
-            if verts_uvs is not None:
-                assert len(verts_uvs) == len(verts) == len(faces_uvs) == len(texture_map)
-            else:
-                verts_uvs = faces_uvs = texture_map = [None] * len(verts)
-        else:
-            verts = meshes.verts_list()
-            faces = meshes.faces_list()
-            verts_uvs = [None] * len(verts)
-            faces_uvs = [None] * len(verts)
-            texture_map = [None] * len(verts)
-            if meshes.textures is not None:
-                assert isinstance(meshes.textures, TexturesUV)
-                verts_uvs = meshes.textures.verts_uvs_list()
-                faces_uvs = meshes.textures.faces_uvs_list()
-                texture_map = meshes.textures.maps_list()
-
-        for idx, (v, f, v_uv, f_uv, tex) in enumerate(zip(verts, faces, verts_uvs, faces_uvs, texture_map)):
-            filename = os.path.join(self.mesh_folder, f'{name}-{idx}.obj')
-            io.save_obj(filename, v, f, verts_uvs=v_uv, faces_uvs=f_uv, texture_map=tex)
-
     def _plot(self, nums, prints):
         summary = pd.DataFrame()
         fig = plt.figure()
@@ -1467,21 +1390,20 @@ class Monitor:
             it, epoch, nums, mats, imgs, hists, points = items
             prints = []
 
-            with plt.xkcd():
-                # plot statistics
-                self._plot(nums, prints)
+            # plot statistics
+            self._plot(nums, prints)
 
-                # plot confusion matrix
-                self._plot_matrix(mats)
+            # plot confusion matrix
+            self._plot_matrix(mats)
 
-                # save recorded images
-                self._imwrite(imgs)
+            # save recorded images
+            self._imwrite(imgs)
 
-                # make histograms of recorded data
-                self._hist(hists)
+            # make histograms of recorded data
+            self._hist(hists)
 
-                # scatter point set(s)
-                self._scatter(points)
+            # scatter point set(s)
+            self._scatter(points)
 
             lock.acquire_write()
             with open(os.path.join(self.file_folder, self._log_file), 'wb') as f:
@@ -1492,24 +1414,24 @@ class Monitor:
                 f.close()
             lock.release_write()
 
-            epoch_perc = (it % self.num_iters_per_epoch) / self.num_iters_per_epoch if self.num_iters_per_epoch else None
-            epoch_show = f'Epoch {epoch + 1}/{self.num_epochs}' if self.num_epochs else f'Epoch {epoch + 1}'
-            iter_show = f'{epoch_show} Iteration {it % self.num_iters_per_epoch}/{self.num_iters_per_epoch} ' \
-                        f'({epoch_perc * 100:.2f}%)' if self.num_iters_per_epoch else f'Epoch {epoch + 1} Iteration {it}'
+            iter_show = 'Epoch {} Iteration {}/{} ({:.2f}%)'.format(
+                epoch + 1, it % self.num_iters, self.num_iters,
+                (it % self.num_iters) / self.num_iters * 100.) if self.num_iters \
+                else 'Epoch {} Iteration {}'.format(epoch + 1, it)
 
-            elapsed_time = time.time() - self._init_time
-            if self.num_iters_per_epoch and self.num_epochs:
-                eta = elapsed_time / (epoch - self._start_epoch + epoch_perc + 1e-8) \
-                      * (self.num_epochs - (epoch + epoch_perc))
-                eta, eta_unit = _convert_time_human_readable(eta)
-                eta_str = f'ETA {eta:.2f}{eta_unit}'
+            elapsed_time = time.time() - self._timer
+            if elapsed_time < 3600:
+                time_unit = 'mins'
+                elapsed_time /= 60.
+            elif 86400 > elapsed_time >= 3600:
+                time_unit = 'hrs'
+                elapsed_time /= 3600.
             else:
-                eta_str = f'ETA N/A'
+                time_unit = 'days'
+                elapsed_time /= 86400
 
-            elapsed_time, elapsed_time_unit = _convert_time_human_readable(elapsed_time)
-            elapsed_time_str = f'{elapsed_time:.2f}{elapsed_time_unit}'
-            log = f'{self.current_run}\t Elapsed time {elapsed_time_str} ({eta_str})\t{iter_show}\t' + '\t'.join(prints)
-            log += '\n'
+            elapsed_time_str = '{:.2f}'.format(elapsed_time) + time_unit
+            log = 'Elapsed time {} {}\t{}\t{}'.format(elapsed_time_str, self.current_run, iter_show, '\t'.join(prints))
             root_logger.info(log)
             self._q.task_done()
 
@@ -1556,7 +1478,7 @@ class Monitor:
 
     def save_to_table(self, table_name: str, **kwargs: Any):
         """
-        writes summary into a csv table.
+        Write summary into a csv table.
         Adapted from https://github.com/JonasGeiping/fullbatchtraining.
 
         :param table_name:
@@ -1759,8 +1681,8 @@ class Monitor:
         self._dump_files = collections.OrderedDict()
         self._iter = 0
         self._last_epoch = 0
-        self.num_iters_per_epoch = self._num_iters_per_epoch
-        self._init_time = time.time()
+        self.num_iters = self._num_iters
+        self._timer = time.time()
 
     def read_log(self):
         """
@@ -1817,7 +1739,6 @@ class Monitor:
         hooks += [mod.register_forward_hook(post_hook) for mod in module.modules()]
 
         # Run module.
-        module.eval()
         module(*inputs)
         for hook in hooks:
             hook.remove()
